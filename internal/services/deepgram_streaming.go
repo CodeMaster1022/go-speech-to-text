@@ -192,12 +192,14 @@ func (ds *DeepgramStreamingService) readResponses(reader io.Reader, results chan
 		responseCount++
 		ds.logger.Infof("📨 Received response #%d from Deepgram", responseCount)
 
-		// Log the raw response for debugging
-		responseStr := fmt.Sprintf("%+v", rawResponse)
-		if len(responseStr) > 500 {
-			ds.logger.Infof("Raw response (truncated): %s...", responseStr[:500])
-		} else {
-			ds.logger.Infof("Raw response: %s", responseStr)
+		// Log the raw response as JSON for better debugging
+		if jsonBytes, err := json.Marshal(rawResponse); err == nil {
+			responseStr := string(jsonBytes)
+			if len(responseStr) > 1000 {
+				ds.logger.Infof("Raw response (truncated): %s...", responseStr[:1000])
+			} else {
+				ds.logger.Infof("Raw response: %s", responseStr)
+			}
 		}
 
 		// Parse the actual Deepgram response format
@@ -228,74 +230,82 @@ func (ds *DeepgramStreamingService) readResponses(reader io.Reader, results chan
 
 		alt, isAltMap := alternatives[0].(map[string]interface{})
 		if isAltMap {
-							transcript := ""
-							confidence := 0.0
-							isFinal := true
+			transcript := ""
+			confidence := 0.0
+			isFinal := true
 
-							if t, ok := alt["transcript"].(string); ok {
-								transcript = t
-							}
-							if c, ok := alt["confidence"].(float64); ok {
-								confidence = c
-							}
-							if speechFinal, ok := rawResponse["speech_final"].(bool); ok {
-								isFinal = speechFinal
-							} else if isFinalField, ok := rawResponse["is_final"].(bool); ok {
-								isFinal = isFinalField
-							}
+			if t, ok := alt["transcript"].(string); ok {
+				transcript = t
+			}
+			if c, ok := alt["confidence"].(float64); ok {
+				confidence = c
+			}
+			
+			// Check for speech_final in the top-level response
+			if speechFinal, ok := rawResponse["speech_final"].(bool); ok {
+				isFinal = speechFinal
+			} else if isFinalField, ok := rawResponse["is_final"].(bool); ok {
+				isFinal = isFinalField
+			} else {
+				// Default to treating as interim if no finality flag
+				isFinal = false
+			}
 
-							// Skip empty transcripts
-							if transcript == "" {
-								ds.logger.Debug("Skipping empty transcript")
-								continue
-							}
+			ds.logger.Infof("🔍 Extracted: transcript='%s', confidence=%.2f, speech_final=%v", 
+				transcript, confidence, isFinal)
 
-							transcriptionData := &TranscriptionData{
-								Text:       transcript,
-								Confidence: confidence,
-								IsPartial:  !isFinal,
-							}
+			// Skip empty transcripts
+			if transcript == "" {
+				ds.logger.Info("⚠️ Skipping empty transcript")
+				continue
+			}
 
-							// Parse words if available
-							if words, ok := alt["words"].([]interface{}); ok && len(words) > 0 {
-								wordList := make([]Word, len(words))
-								for i, w := range words {
-									if wordMap, ok := w.(map[string]interface{}); ok {
-										word := Word{}
-										if wrd, ok := wordMap["word"].(string); ok {
-											word.Word = wrd
-										}
-										if conf, ok := wordMap["confidence"].(float64); ok {
-											word.Confidence = conf
-										}
-										if start, ok := wordMap["start"].(float64); ok {
-											word.Start = start
-										}
-										if end, ok := wordMap["end"].(float64); ok {
-											word.End = end
-										}
-										wordList[i] = word
-									}
-								}
-							transcriptionData.Words = wordList
+			transcriptionData := &TranscriptionData{
+				Text:       transcript,
+				Confidence: confidence,
+				IsPartial:  !isFinal,
+			}
+
+			// Parse words if available
+			if words, ok := alt["words"].([]interface{}); ok && len(words) > 0 {
+				wordList := make([]Word, len(words))
+				for i, w := range words {
+					if wordMap, ok := w.(map[string]interface{}); ok {
+						word := Word{}
+						if wrd, ok := wordMap["word"].(string); ok {
+							word.Word = wrd
 						}
-
-						ds.logger.Infof("✅ Parsed transcript: '%s', confidence: %.2f, is_final: %v", 
-							transcript, confidence, isFinal)
-
-						// Try to send the result
-						select {
-						case results <- transcriptionData:
-							ds.logger.Info("✅ Transcription sent to results channel")
-						case <-time.After(5 * time.Second):
-							ds.logger.Error("❌ Timeout sending transcription result")
+						if conf, ok := wordMap["confidence"].(float64); ok {
+							word.Confidence = conf
 						}
-					} else {
-						ds.logger.Warn("Alternative is not a map")
+						if start, ok := wordMap["start"].(float64); ok {
+							word.Start = start
+						}
+						if end, ok := wordMap["end"].(float64); ok {
+							word.End = end
+						}
+						wordList[i] = word
 					}
+				}
+				transcriptionData.Words = wordList
+			}
+
+			ds.logger.Infof("✅ Parsed transcript: '%s', confidence: %.2f, is_final: %v", 
+				transcript, confidence, isFinal)
+
+			// Try to send the result
+			select {
+			case results <- transcriptionData:
+				ds.logger.Info("✅ Transcription sent to results channel")
+			case <-time.After(5 * time.Second):
+				ds.logger.Error("❌ Timeout sending transcription result")
+			}
+		} else {
+			ds.logger.Warn("Alternative is not a map")
+		}
 	}
 }
-}
+
 
 // buildStreamingParams builds query parameters for streaming
 func (ds *DeepgramStreamingService) buildStreamingParams(options *StreamingTranscriptionOptions) string {
