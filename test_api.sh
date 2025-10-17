@@ -3,7 +3,7 @@
 # Test script for Speech-to-Text Backend API
 # Make sure the service is running before executing this script
 
-BASE_URL="http://localhost:8080"
+BASE_URL="http://localhost:8081"
 
 echo "🧪 Testing Speech-to-Text Backend API"
 echo "======================================"

@@ -57,7 +57,7 @@ go mod download
 go run main.go
 ```
 
-The service will be available at `http://localhost:8080`
+The service will be available at `http://localhost:8081`
 
 ## API Endpoints
 
@@ -98,7 +98,7 @@ POST /api/v1/transcribe
 
 **Example using curl:**
 ```bash
-curl -X POST http://localhost:8080/api/v1/transcribe \
+curl -X POST http://localhost:8081/api/v1/transcribe \
   -F "audio=@sample.wav" \
   -F "language=en" \
   -F "include_words=true"
