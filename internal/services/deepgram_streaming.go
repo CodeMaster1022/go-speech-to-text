@@ -193,23 +193,11 @@ func (ds *DeepgramStreamingService) readResponsesWS(ctx context.Context, conn *w
 				}
 			}
 
-			// Parse the actual Deepgram response format
-			// Deepgram sends: {"results": {"channels": [{"alternatives": [{"transcript": "...", "confidence": 0.9}]}]}}
-			resultsMap, hasResults := rawResponse["results"].(map[string]interface{})
-			if !hasResults {
-				ds.logger.Warn("Response missing 'results' field")
-				continue
-			}
-
-			channels, hasChannels := resultsMap["channels"].([]interface{})
-			if !hasChannels || len(channels) == 0 {
-				ds.logger.Warn("Response missing 'channels' field or empty")
-				continue
-			}
-
-			channel, isChannelMap := channels[0].(map[string]interface{})
-			if !isChannelMap {
-				ds.logger.Warn("First channel is not a map")
+			// Parse the WebSocket response format
+			// WebSocket sends: {"channel": {"alternatives": [{"transcript": "...", "confidence": 0.9}]}, "is_final": false}
+			channel, hasChannel := rawResponse["channel"].(map[string]interface{})
+			if !hasChannel {
+				ds.logger.Debug("Response missing 'channel' field (might be metadata)")
 				continue
 			}
 
