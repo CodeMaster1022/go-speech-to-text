@@ -236,22 +236,44 @@ func (ws *WebSocketService) processMessage(client *Client, msg *WSMessage) {
 
 // processAudioChunk processes audio data for real-time transcription
 func (ws *WebSocketService) processAudioChunk(client *Client, msg *WSMessage) {
-	// This would integrate with Deepgram's streaming API
-	// For now, we'll simulate the response
-	transcriptionData := TranscriptionData{
-		Text:       "Sample transcription text",
-		Confidence:  0.95,
-		IsPartial:  true,
-		Language:   client.Language,
-		SessionID:  client.SessionID,
+	// Extract audio data from message
+	audioData, ok := msg.Data.([]interface{})
+	if !ok {
+		ws.logger.Error("Invalid audio data format")
+		return
 	}
 
-	ws.sendMessage(client, WSMessage{
-		Type:      "transcription_partial",
-		Data:      transcriptionData,
-		SessionID: client.SessionID,
-		Timestamp: time.Now().Unix(),
-	})
+	// Convert to byte array
+	audioBytes := make([]byte, len(audioData))
+	for i, v := range audioData {
+		if val, ok := v.(float64); ok {
+			audioBytes[i] = byte(val)
+		}
+	}
+
+	// For now, we'll simulate transcription response
+	// In a full implementation, you would:
+	// 1. Accumulate audio chunks
+	// 2. Send to Deepgram streaming API
+	// 3. Process real-time responses
+	
+	// Simulate partial transcription
+	if len(audioBytes) > 0 {
+		transcriptionData := TranscriptionData{
+			Text:       "Processing audio...",
+			Confidence:  0.85,
+			IsPartial:  true,
+			Language:   client.Language,
+			SessionID:  client.SessionID,
+		}
+
+		ws.sendMessage(client, WSMessage{
+			Type:      "transcription_partial",
+			Data:      transcriptionData,
+			SessionID: client.SessionID,
+			Timestamp: time.Now().Unix(),
+		})
+	}
 }
 
 // sendMessage sends a message to a specific client
