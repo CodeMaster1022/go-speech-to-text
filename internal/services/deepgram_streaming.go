@@ -138,7 +138,7 @@ func (ds *DeepgramStreamingService) sendAudioChunksWS(ctx context.Context, conn 
 				ds.logger.Infof("Sent %d audio chunks to Deepgram (%d bytes total)", chunkCount, totalBytes)
 			}
 		case <-ctx.Done():
-			ds.logger.Infof("Context cancelled, stopping audio sender after %d chunks (%d bytes)", chunkCount, totalBytes)
+			// ds.logger.Infof("Context cancelled, stopping audio sender after %d chunks (%d bytes)", chunkCount, totalBytes)
 			return
 		}
 	}
@@ -168,7 +168,7 @@ func (ds *DeepgramStreamingService) readResponsesWS(ctx context.Context, conn *w
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
 					ds.logger.WithError(err).Error("WebSocket closed unexpectedly")
 				} else {
-					ds.logger.Infof("Deepgram WebSocket closed (received %d responses)", responseCount)
+					// ds.logger.Infof("Deepgram WebSocket closed (received %d responses)", responseCount)
 				}
 				return
 			}
@@ -181,7 +181,7 @@ func (ds *DeepgramStreamingService) readResponsesWS(ctx context.Context, conn *w
 			}
 
 			responseCount++
-			ds.logger.Infof("📨 Received response #%d from Deepgram", responseCount)
+			// ds.logger.Infof("📨 Received response #%d from Deepgram", responseCount)
 
 			// Log the raw response as JSON for better debugging
 			if jsonBytes, err := json.Marshal(rawResponse); err == nil {
@@ -233,12 +233,12 @@ func (ds *DeepgramStreamingService) readResponsesWS(ctx context.Context, conn *w
 				isFinal = false
 			}
 
-			ds.logger.Infof("🔍 Extracted: transcript='%s', confidence=%.2f, speech_final=%v", 
-				transcript, confidence, isFinal)
+			// ds.logger.Infof("🔍 Extracted: transcript='%s', confidence=%.2f, speech_final=%v", 
+				// transcript, confidence, isFinal)
 
 			// Skip empty transcripts
 			if transcript == "" {
-				ds.logger.Info("⚠️ Skipping empty transcript")
+				// ds.logger.Info("⚠️ Skipping empty transcript")
 				continue
 			}
 
@@ -272,8 +272,8 @@ func (ds *DeepgramStreamingService) readResponsesWS(ctx context.Context, conn *w
 				transcriptionData.Words = wordList
 			}
 
-			ds.logger.Infof("✅ Parsed transcript: '%s', confidence: %.2f, is_final: %v", 
-				transcript, confidence, isFinal)
+			// ds.logger.Infof("✅ Parsed transcript: '%s', confidence: %.2f, is_final: %v", 
+				// transcript, confidence, isFinal)
 
 			// Try to send the result
 			select {
