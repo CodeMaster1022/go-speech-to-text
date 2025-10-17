@@ -172,8 +172,8 @@ func (ds *DeepgramStreamingService) readResponses(reader io.Reader, results chan
 
 	decoder := json.NewDecoder(reader)
 	for {
-		var response StreamingResponse
-		if err := decoder.Decode(&response); err != nil {
+		var rawResponse map[string]interface{}
+		if err := decoder.Decode(&rawResponse); err != nil {
 			if err == io.EOF {
 				break
 			}
@@ -181,31 +181,70 @@ func (ds *DeepgramStreamingService) readResponses(reader io.Reader, results chan
 			continue
 		}
 
-		// Convert to our TranscriptionData format
-		transcriptionData := &TranscriptionData{
-			Text:       response.Data.Transcript,
-			Confidence: response.Data.Confidence,
-			IsPartial:  !response.Data.IsFinal,
-		}
+		// Log the raw response for debugging
+		ds.logger.Infof("Raw Deepgram response: %+v", rawResponse)
 
-		// Convert words if available
-		if len(response.Data.Words) > 0 {
-			words := make([]Word, len(response.Data.Words))
-			for i, word := range response.Data.Words {
-				words[i] = Word{
-					Word:       word.Word,
-					Confidence: word.Confidence,
-					Start:      word.Start,
-					End:        word.End,
+		// Parse the actual Deepgram response format
+		// Deepgram sends: {"channel": {"alternatives": [{"transcript": "...", "confidence": 0.9}]}}
+		if channel, ok := rawResponse["channel"].(map[string]interface{}); ok {
+			if alternatives, ok := channel["alternatives"].([]interface{}); ok && len(alternatives) > 0 {
+				if alt, ok := alternatives[0].(map[string]interface{}); ok {
+					transcript := ""
+					confidence := 0.0
+					isFinal := true
+
+					if t, ok := alt["transcript"].(string); ok {
+						transcript = t
+					}
+					if c, ok := alt["confidence"].(float64); ok {
+						confidence = c
+					}
+					if speechFinal, ok := rawResponse["speech_final"].(bool); ok {
+						isFinal = speechFinal
+					} else if isFinalField, ok := rawResponse["is_final"].(bool); ok {
+						isFinal = isFinalField
+					}
+
+					transcriptionData := &TranscriptionData{
+						Text:       transcript,
+						Confidence: confidence,
+						IsPartial:  !isFinal,
+					}
+
+					// Parse words if available
+					if words, ok := alt["words"].([]interface{}); ok && len(words) > 0 {
+						wordList := make([]Word, len(words))
+						for i, w := range words {
+							if wordMap, ok := w.(map[string]interface{}); ok {
+								word := Word{}
+								if wrd, ok := wordMap["word"].(string); ok {
+									word.Word = wrd
+								}
+								if conf, ok := wordMap["confidence"].(float64); ok {
+									word.Confidence = conf
+								}
+								if start, ok := wordMap["start"].(float64); ok {
+									word.Start = start
+								}
+								if end, ok := wordMap["end"].(float64); ok {
+									word.End = end
+								}
+								wordList[i] = word
+							}
+						}
+						transcriptionData.Words = wordList
+					}
+
+					ds.logger.Infof("Parsed transcript: '%s', confidence: %.2f, is_final: %v", 
+						transcript, confidence, isFinal)
+
+					select {
+					case results <- transcriptionData:
+					case <-time.After(5 * time.Second):
+						ds.logger.Warn("Timeout sending transcription result")
+					}
 				}
 			}
-			transcriptionData.Words = words
-		}
-
-		select {
-		case results <- transcriptionData:
-		case <-time.After(5 * time.Second):
-			ds.logger.Warn("Timeout sending transcription result")
 		}
 	}
 }
