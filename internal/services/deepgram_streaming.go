@@ -97,26 +97,28 @@ func (ds *DeepgramStreamingService) StartStreamingTranscription(
 	// Start goroutine to send audio chunks to the pipe
 	go ds.sendAudioChunks(ctx, writer, audioChunks)
 
-	// Start the request (this will block until complete or context is cancelled)
-	resp, err := ds.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to start streaming request: %w", err)
-	}
-	defer resp.Body.Close()
+	// Make the HTTP request in a goroutine to handle response streaming
+	go func() {
+		resp, err := ds.client.Do(req)
+		if err != nil {
+			ds.logger.WithError(err).Error("Failed to connect to Deepgram")
+			close(results)
+			return
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		ds.logger.Errorf("Deepgram returned status %d: %s", resp.StatusCode, string(bodyBytes))
-		return fmt.Errorf("streaming request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
-	}
+		if resp.StatusCode != http.StatusOK {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			ds.logger.Errorf("Deepgram returned status %d: %s", resp.StatusCode, string(bodyBytes))
+			close(results)
+			return
+		}
 
-	ds.logger.Info("Deepgram streaming connection established successfully")
+		ds.logger.Info("Deepgram streaming connection established successfully")
 
-	// Start goroutine to read responses
-	go ds.readResponses(resp.Body, results)
-
-	// Wait for context to be cancelled
-	<-ctx.Done()
+		// Read responses (this blocks until the connection closes)
+		ds.readResponses(resp.Body, results)
+	}()
 
 	return nil
 }
