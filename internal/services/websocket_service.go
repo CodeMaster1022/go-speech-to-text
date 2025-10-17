@@ -236,8 +236,15 @@ func (ws *WebSocketService) processMessage(client *Client, msg *WSMessage) {
 
 // processAudioChunk processes audio data for real-time transcription
 func (ws *WebSocketService) processAudioChunk(client *Client, msg *WSMessage) {
-	// This would integrate with Deepgram's streaming API
-	// For now, we'll simulate the response
+	// Get base64 audio data from message
+	audioData, ok := msg.Data.(string)
+	if !ok {
+		ws.logger.WithField("client_id", client.ID).Error("Invalid audio chunk data")
+		return
+	}
+
+	// For now, we'll simulate the response since we need to implement Deepgram streaming
+	// TODO: Integrate with Deepgram's streaming API for real-time transcription
 	transcriptionData := TranscriptionData{
 		Text:       "Sample transcription text",
 		Confidence:  0.95,
