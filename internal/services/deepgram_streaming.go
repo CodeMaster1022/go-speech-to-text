@@ -89,7 +89,7 @@ func (ds *DeepgramStreamingService) StartStreamingTranscription(
 
 	// Set headers
 	req.Header.Set("Authorization", "Token "+ds.apiKey)
-	req.Header.Set("Content-Type", "audio/webm")
+	req.Header.Set("Content-Type", "audio/raw")
 	req.Header.Set("Transfer-Encoding", "chunked")
 
 	ds.logger.Info("Starting Deepgram streaming connection...")
@@ -213,6 +213,15 @@ func (ds *DeepgramStreamingService) readResponses(reader io.Reader, results chan
 // buildStreamingParams builds query parameters for streaming
 func (ds *DeepgramStreamingService) buildStreamingParams(options *StreamingTranscriptionOptions) string {
 	var params []string
+
+	// Set encoding to linear16 (raw PCM)
+	params = append(params, "encoding=linear16")
+	
+	// Set sample rate for linear16
+	params = append(params, "sample_rate=16000")
+	
+	// Set channels (mono)
+	params = append(params, "channels=1")
 
 	if options.Model != "" {
 		params = append(params, fmt.Sprintf("model=%s", options.Model))
