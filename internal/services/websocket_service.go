@@ -1,6 +1,8 @@
 package services
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"sync"
@@ -13,10 +15,11 @@ import (
 
 // WebSocketService handles WebSocket connections for real-time speech-to-text
 type WebSocketService struct {
-	upgrader websocket.Upgrader
-	clients  map[string]*Client
-	mutex    sync.RWMutex
-	logger   *logrus.Logger
+	upgrader           websocket.Upgrader
+	clients            map[string]*Client
+	mutex              sync.RWMutex
+	logger             *logrus.Logger
+	deepgramStreaming  *DeepgramStreamingService
 }
 
 // Client represents a WebSocket client connection
@@ -28,6 +31,9 @@ type Client struct {
 	SessionID    string
 	IsRecording  bool
 	LastActivity time.Time
+	AudioChunks  chan []byte
+	StreamingCtx context.Context
+	StreamingCancel context.CancelFunc
 }
 
 // Message types for WebSocket communication
@@ -58,7 +64,13 @@ type MedicalTerm struct {
 }
 
 // NewWebSocketService creates a new WebSocket service
-func NewWebSocketService(logger *logrus.Logger) *WebSocketService {
+func NewWebSocketService(logger *logrus.Logger, deepgramAPIKey string) *WebSocketService {
+	// Initialize Deepgram streaming service
+	deepgramStreaming, err := NewDeepgramStreamingService(deepgramAPIKey, logger)
+	if err != nil {
+		logger.WithError(err).Fatal("Failed to initialize Deepgram streaming service")
+	}
+
 	return &WebSocketService{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
@@ -67,8 +79,9 @@ func NewWebSocketService(logger *logrus.Logger) *WebSocketService {
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 		},
-		clients: make(map[string]*Client),
-		logger:  logger,
+		clients:           make(map[string]*Client),
+		logger:            logger,
+		deepgramStreaming: deepgramStreaming,
 	}
 }
 
@@ -81,14 +94,19 @@ func (ws *WebSocketService) HandleWebSocket(w http.ResponseWriter, r *http.Reque
 	}
 
 	clientID := uuid.New().String()
+	streamingCtx, streamingCancel := context.WithCancel(context.Background())
+	
 	client := &Client{
-		ID:           clientID,
-		Conn:         conn,
-		Send:         make(chan []byte, 256),
-		Language:     "en", // Default language
-		SessionID:    uuid.New().String(),
-		IsRecording:  false,
-		LastActivity: time.Now(),
+		ID:             clientID,
+		Conn:           conn,
+		Send:           make(chan []byte, 256),
+		Language:       "en", // Default language
+		SessionID:      uuid.New().String(),
+		IsRecording:    false,
+		LastActivity:   time.Now(),
+		AudioChunks:    make(chan []byte, 100),
+		StreamingCtx:   streamingCtx,
+		StreamingCancel: streamingCancel,
 	}
 
 	ws.mutex.Lock()
@@ -105,6 +123,12 @@ func (ws *WebSocketService) HandleWebSocket(w http.ResponseWriter, r *http.Reque
 // handleClient handles messages from a specific client
 func (ws *WebSocketService) handleClient(client *Client) {
 	defer func() {
+		// Cancel streaming context
+		client.StreamingCancel()
+		
+		// Close audio chunks channel
+		close(client.AudioChunks)
+		
 		ws.mutex.Lock()
 		delete(ws.clients, client.ID)
 		ws.mutex.Unlock()
@@ -182,6 +206,10 @@ func (ws *WebSocketService) processMessage(client *Client, msg *WSMessage) {
 	case "start_recording":
 		client.IsRecording = true
 		client.SessionID = uuid.New().String()
+		
+		// Start Deepgram streaming for this client
+		go ws.startDeepgramStreaming(client)
+		
 		ws.sendMessage(client, WSMessage{
 			Type:      "recording_started",
 			Data:      map[string]string{"session_id": client.SessionID},
@@ -243,22 +271,76 @@ func (ws *WebSocketService) processAudioChunk(client *Client, msg *WSMessage) {
 		return
 	}
 
-	// For now, we'll simulate the response since we need to implement Deepgram streaming
-	// TODO: Integrate with Deepgram's streaming API for real-time transcription
-	transcriptionData := TranscriptionData{
-		Text:       "Sample transcription text",
-		Confidence:  0.95,
-		IsPartial:  true,
-		Language:   client.Language,
-		SessionID:  client.SessionID,
+	// Decode base64 audio data
+	audioBytes, err := base64.StdEncoding.DecodeString(audioData)
+	if err != nil {
+		ws.logger.WithError(err).WithField("client_id", client.ID).Error("Failed to decode audio data")
+		return
 	}
 
-	ws.sendMessage(client, WSMessage{
-		Type:      "transcription_partial",
-		Data:      transcriptionData,
-		SessionID: client.SessionID,
-		Timestamp: time.Now().Unix(),
-	})
+	// Send audio chunk to Deepgram streaming
+	select {
+	case client.AudioChunks <- audioBytes:
+		// Audio chunk sent successfully
+	default:
+		ws.logger.WithField("client_id", client.ID).Warn("Audio chunks channel full, dropping chunk")
+	}
+}
+
+// startDeepgramStreaming starts Deepgram streaming for a client
+func (ws *WebSocketService) startDeepgramStreaming(client *Client) {
+	// Create streaming options
+	options := DefaultStreamingOptions()
+	options.Language = client.Language
+	options.MedicalVocab = true
+	options.InterimResults = true
+
+	// Create results channel
+	results := make(chan *TranscriptionData, 100)
+
+	// Start streaming transcription
+	err := ws.deepgramStreaming.StartStreamingTranscription(
+		client.StreamingCtx,
+		options,
+		client.AudioChunks,
+		results,
+	)
+	if err != nil {
+		ws.logger.WithError(err).WithField("client_id", client.ID).Error("Failed to start Deepgram streaming")
+		return
+	}
+
+	// Process results
+	for {
+		select {
+		case result, ok := <-results:
+			if !ok {
+				ws.logger.WithField("client_id", client.ID).Info("Deepgram streaming ended")
+				return
+			}
+
+			// Send transcription result to client
+			transcriptionData := TranscriptionData{
+				Text:       result.Text,
+				Confidence: result.Confidence,
+				Words:      result.Words,
+				IsPartial:  result.IsPartial,
+				Language:   client.Language,
+				SessionID:  client.SessionID,
+			}
+
+			ws.sendMessage(client, WSMessage{
+				Type:      "transcription_partial",
+				Data:      transcriptionData,
+				SessionID: client.SessionID,
+				Timestamp: time.Now().Unix(),
+			})
+
+		case <-client.StreamingCtx.Done():
+			ws.logger.WithField("client_id", client.ID).Info("Deepgram streaming cancelled")
+			return
+		}
+	}
 }
 
 // sendMessage sends a message to a specific client

@@ -32,7 +32,7 @@ func New(cfg *config.Config, logger *logrus.Logger) *Handlers {
 	}
 
 	// Initialize WebSocket service
-	websocketService := services.NewWebSocketService(logger)
+	websocketService := services.NewWebSocketService(logger, cfg.DeepgramAPIKey)
 
 	// Initialize Medical Vocabulary service
 	medicalVocabService := services.NewMedicalVocabularyService()
