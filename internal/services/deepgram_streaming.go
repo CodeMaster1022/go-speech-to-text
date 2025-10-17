@@ -343,8 +343,8 @@ func DefaultStreamingOptions() *StreamingTranscriptionOptions {
 		Multichannel:    false,
 		Alternatives:    1,
 		ProfanityFilter: false,
-		InterimResults:  true,
-		Endpointing:     true,
-		VadEvents:       false,
+		InterimResults:  true,  // Send partial results as user speaks
+		Endpointing:     false, // Don't wait for pauses - send immediately
+		VadEvents:       true,  // Voice activity detection for better real-time
 	}
 }
