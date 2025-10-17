@@ -168,34 +168,66 @@ func (ds *DeepgramStreamingService) sendAudioChunks(ctx context.Context, writer 
 
 // readResponses reads responses from Deepgram
 func (ds *DeepgramStreamingService) readResponses(reader io.Reader, results chan<- *TranscriptionData) {
-	defer close(results)
+	defer func() {
+		ds.logger.Info("Closing Deepgram response reader")
+		close(results)
+	}()
 
+	ds.logger.Info("Starting to read Deepgram responses...")
+	
 	decoder := json.NewDecoder(reader)
+	responseCount := 0
+	
 	for {
 		var rawResponse map[string]interface{}
 		if err := decoder.Decode(&rawResponse); err != nil {
 			if err == io.EOF {
+				ds.logger.Infof("Deepgram stream ended (received %d responses)", responseCount)
 				break
 			}
 			ds.logger.WithError(err).Error("Failed to decode streaming response")
 			continue
 		}
 
-		// Log the raw response for debugging (only first 500 chars to avoid spam)
+		responseCount++
+		ds.logger.Infof("📨 Received response #%d from Deepgram", responseCount)
+
+		// Log the raw response for debugging
 		responseStr := fmt.Sprintf("%+v", rawResponse)
 		if len(responseStr) > 500 {
-			ds.logger.Debugf("Raw Deepgram response (truncated): %s...", responseStr[:500])
+			ds.logger.Infof("Raw response (truncated): %s...", responseStr[:500])
 		} else {
-			ds.logger.Debugf("Raw Deepgram response: %s", responseStr)
+			ds.logger.Infof("Raw response: %s", responseStr)
 		}
 
 		// Parse the actual Deepgram response format
 		// Deepgram sends: {"results": {"channels": [{"alternatives": [{"transcript": "...", "confidence": 0.9}]}]}}
-		if resultsMap, ok := rawResponse["results"].(map[string]interface{}); ok {
-			if channels, ok := resultsMap["channels"].([]interface{}); ok && len(channels) > 0 {
-				if channel, ok := channels[0].(map[string]interface{}); ok {
-					if alternatives, ok := channel["alternatives"].([]interface{}); ok && len(alternatives) > 0 {
-						if alt, ok := alternatives[0].(map[string]interface{}); ok {
+		resultsMap, hasResults := rawResponse["results"].(map[string]interface{})
+		if !hasResults {
+			ds.logger.Warn("Response missing 'results' field")
+			continue
+		}
+
+		channels, hasChannels := resultsMap["channels"].([]interface{})
+		if !hasChannels || len(channels) == 0 {
+			ds.logger.Warn("Response missing 'channels' field or empty")
+			continue
+		}
+
+		channel, isChannelMap := channels[0].(map[string]interface{})
+		if !isChannelMap {
+			ds.logger.Warn("First channel is not a map")
+			continue
+		}
+
+		alternatives, hasAlternatives := channel["alternatives"].([]interface{})
+		if !hasAlternatives || len(alternatives) == 0 {
+			ds.logger.Warn("Channel missing 'alternatives' field or empty")
+			continue
+		}
+
+		alt, isAltMap := alternatives[0].(map[string]interface{})
+		if isAltMap {
 							transcript := ""
 							confidence := 0.0
 							isFinal := true
@@ -245,23 +277,24 @@ func (ds *DeepgramStreamingService) readResponses(reader io.Reader, results chan
 										wordList[i] = word
 									}
 								}
-								transcriptionData.Words = wordList
-							}
-
-							ds.logger.Infof("✅ Parsed transcript: '%s', confidence: %.2f, is_final: %v", 
-								transcript, confidence, isFinal)
-
-							select {
-							case results <- transcriptionData:
-							case <-time.After(5 * time.Second):
-								ds.logger.Warn("Timeout sending transcription result")
-							}
+							transcriptionData.Words = wordList
 						}
+
+						ds.logger.Infof("✅ Parsed transcript: '%s', confidence: %.2f, is_final: %v", 
+							transcript, confidence, isFinal)
+
+						// Try to send the result
+						select {
+						case results <- transcriptionData:
+							ds.logger.Info("✅ Transcription sent to results channel")
+						case <-time.After(5 * time.Second):
+							ds.logger.Error("❌ Timeout sending transcription result")
+						}
+					} else {
+						ds.logger.Warn("Alternative is not a map")
 					}
-				}
-			}
-		}
 	}
+}
 }
 
 // buildStreamingParams builds query parameters for streaming
