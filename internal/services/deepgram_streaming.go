@@ -4,17 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"net/url"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/sirupsen/logrus"
 )
 
-// DeepgramStreamingService handles real-time streaming to Deepgram
+// DeepgramStreamingService handles real-time streaming to Deepgram via WebSocket
 type DeepgramStreamingService struct {
 	apiKey string
-	client *http.Client
 	logger *logrus.Logger
 }
 
@@ -60,75 +59,54 @@ func NewDeepgramStreamingService(apiKey string, logger *logrus.Logger) (*Deepgra
 
 	return &DeepgramStreamingService{
 		apiKey: apiKey,
-		client: &http.Client{
-			Timeout: 0, // No timeout for streaming
-		},
 		logger: logger,
 	}, nil
 }
 
-// StartStreamingTranscription starts a streaming transcription session
+// StartStreamingTranscription starts a streaming transcription session via WebSocket
 func (ds *DeepgramStreamingService) StartStreamingTranscription(
 	ctx context.Context,
 	options *StreamingTranscriptionOptions,
 	audioChunks <-chan []byte,
 	results chan<- *TranscriptionData,
 ) error {
-	// Build query parameters
+	// Build WebSocket URL with query parameters
 	params := ds.buildStreamingParams(options)
-	url := fmt.Sprintf("https://api.deepgram.com/v1/listen?%s", params)
+	wsURL := fmt.Sprintf("wss://api.deepgram.com/v1/listen?%s", params)
 
-	// Create a pipe to send audio chunks - MUST be created BEFORE the request
-	reader, writer := io.Pipe()
+	ds.logger.Infof("Connecting to Deepgram WebSocket: %s", wsURL)
 
-	// Create HTTP request with the pipe reader as the body
-	req, err := http.NewRequestWithContext(ctx, "POST", url, reader)
+	// Parse URL
+	u, err := url.Parse(wsURL)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return fmt.Errorf("failed to parse WebSocket URL: %w", err)
 	}
 
-	// Set headers
-	req.Header.Set("Authorization", "Token "+ds.apiKey)
-	req.Header.Set("Content-Type", "audio/raw")
-	req.Header.Set("Transfer-Encoding", "chunked")
+	// Set up WebSocket dialer with authorization header
+	header := make(map[string][]string)
+	header["Authorization"] = []string{"Token " + ds.apiKey}
 
-	ds.logger.Info("Starting Deepgram streaming connection...")
+	// Connect to Deepgram WebSocket
+	conn, _, err := websocket.DefaultDialer.Dial(u.String(), header)
+	if err != nil {
+		ds.logger.WithError(err).Error("Failed to connect to Deepgram WebSocket")
+		return fmt.Errorf("failed to connect to Deepgram WebSocket: %w", err)
+	}
 
-	// Start goroutine to send audio chunks to the pipe
-	go ds.sendAudioChunks(ctx, writer, audioChunks)
+	ds.logger.Info("✅ Connected to Deepgram WebSocket successfully")
 
-	// Make the HTTP request in a goroutine to handle response streaming
-	go func() {
-		resp, err := ds.client.Do(req)
-		if err != nil {
-			ds.logger.WithError(err).Error("Failed to connect to Deepgram")
-			close(results)
-			return
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			ds.logger.Errorf("Deepgram returned status %d: %s", resp.StatusCode, string(bodyBytes))
-			close(results)
-			return
-		}
-
-		ds.logger.Info("Deepgram streaming connection established successfully")
-
-		// Read responses (this blocks until the connection closes)
-		ds.readResponses(resp.Body, results)
-	}()
+	// Start goroutines to send audio and receive responses
+	go ds.sendAudioChunksWS(ctx, conn, audioChunks)
+	go ds.readResponsesWS(ctx, conn, results)
 
 	return nil
 }
 
-// sendAudioChunks sends audio chunks to Deepgram
-func (ds *DeepgramStreamingService) sendAudioChunks(ctx context.Context, writer io.Writer, audioChunks <-chan []byte) {
+// sendAudioChunksWS sends audio chunks to Deepgram via WebSocket
+func (ds *DeepgramStreamingService) sendAudioChunksWS(ctx context.Context, conn *websocket.Conn, audioChunks <-chan []byte) {
 	defer func() {
-		if closer, ok := writer.(io.Closer); ok {
-			closer.Close()
-		}
+		// Send close message to Deepgram
+		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 		ds.logger.Info("Audio chunk sender stopped")
 	}()
 
@@ -143,17 +121,17 @@ func (ds *DeepgramStreamingService) sendAudioChunks(ctx context.Context, writer 
 				return
 			}
 			
-			n, err := writer.Write(chunk)
-			if err != nil {
-				ds.logger.WithError(err).Error("Failed to send audio chunk to Deepgram")
+			// Send audio as binary WebSocket message
+			if err := conn.WriteMessage(websocket.BinaryMessage, chunk); err != nil {
+				ds.logger.WithError(err).Error("Failed to send audio chunk to Deepgram WebSocket")
 				return
 			}
 			
 			chunkCount++
-			totalBytes += n
+			totalBytes += len(chunk)
 			
 			if chunkCount == 1 {
-				ds.logger.Info("First audio chunk sent to Deepgram successfully")
+				ds.logger.Info("✅ First audio chunk sent to Deepgram WebSocket successfully")
 			}
 			
 			if chunkCount%50 == 0 {
@@ -166,70 +144,86 @@ func (ds *DeepgramStreamingService) sendAudioChunks(ctx context.Context, writer 
 	}
 }
 
-// readResponses reads responses from Deepgram
-func (ds *DeepgramStreamingService) readResponses(reader io.Reader, results chan<- *TranscriptionData) {
+// readResponsesWS reads responses from Deepgram WebSocket
+func (ds *DeepgramStreamingService) readResponsesWS(ctx context.Context, conn *websocket.Conn, results chan<- *TranscriptionData) {
 	defer func() {
-		ds.logger.Info("Closing Deepgram response reader")
+		ds.logger.Info("Closing Deepgram WebSocket response reader")
+		conn.Close()
 		close(results)
 	}()
 
-	ds.logger.Info("Starting to read Deepgram responses...")
+	ds.logger.Info("Starting to read Deepgram WebSocket responses...")
 	
-	decoder := json.NewDecoder(reader)
 	responseCount := 0
 	
 	for {
-		var rawResponse map[string]interface{}
-		if err := decoder.Decode(&rawResponse); err != nil {
-			if err == io.EOF {
-				ds.logger.Infof("Deepgram stream ended (received %d responses)", responseCount)
-				break
+		select {
+		case <-ctx.Done():
+			ds.logger.Info("Context cancelled, stopping WebSocket reader")
+			return
+		default:
+			// Read message from WebSocket
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+					ds.logger.WithError(err).Error("WebSocket closed unexpectedly")
+				} else {
+					ds.logger.Infof("Deepgram WebSocket closed (received %d responses)", responseCount)
+				}
+				return
 			}
-			ds.logger.WithError(err).Error("Failed to decode streaming response")
-			continue
-		}
 
-		responseCount++
-		ds.logger.Infof("📨 Received response #%d from Deepgram", responseCount)
-
-		// Log the raw response as JSON for better debugging
-		if jsonBytes, err := json.Marshal(rawResponse); err == nil {
-			responseStr := string(jsonBytes)
-			if len(responseStr) > 1000 {
-				ds.logger.Infof("Raw response (truncated): %s...", responseStr[:1000])
-			} else {
-				ds.logger.Infof("Raw response: %s", responseStr)
+			// Parse JSON response
+			var rawResponse map[string]interface{}
+			if err := json.Unmarshal(message, &rawResponse); err != nil {
+				ds.logger.WithError(err).Error("Failed to parse WebSocket message")
+				continue
 			}
-		}
 
-		// Parse the actual Deepgram response format
-		// Deepgram sends: {"results": {"channels": [{"alternatives": [{"transcript": "...", "confidence": 0.9}]}]}}
-		resultsMap, hasResults := rawResponse["results"].(map[string]interface{})
-		if !hasResults {
-			ds.logger.Warn("Response missing 'results' field")
-			continue
-		}
+			responseCount++
+			ds.logger.Infof("📨 Received response #%d from Deepgram", responseCount)
 
-		channels, hasChannels := resultsMap["channels"].([]interface{})
-		if !hasChannels || len(channels) == 0 {
-			ds.logger.Warn("Response missing 'channels' field or empty")
-			continue
-		}
+			// Log the raw response as JSON for better debugging
+			if jsonBytes, err := json.Marshal(rawResponse); err == nil {
+				responseStr := string(jsonBytes)
+				if len(responseStr) > 1000 {
+					ds.logger.Infof("Raw response (truncated): %s...", responseStr[:1000])
+				} else {
+					ds.logger.Infof("Raw response: %s", responseStr)
+				}
+			}
 
-		channel, isChannelMap := channels[0].(map[string]interface{})
-		if !isChannelMap {
-			ds.logger.Warn("First channel is not a map")
-			continue
-		}
+			// Parse the actual Deepgram response format
+			// Deepgram sends: {"results": {"channels": [{"alternatives": [{"transcript": "...", "confidence": 0.9}]}]}}
+			resultsMap, hasResults := rawResponse["results"].(map[string]interface{})
+			if !hasResults {
+				ds.logger.Warn("Response missing 'results' field")
+				continue
+			}
 
-		alternatives, hasAlternatives := channel["alternatives"].([]interface{})
-		if !hasAlternatives || len(alternatives) == 0 {
-			ds.logger.Warn("Channel missing 'alternatives' field or empty")
-			continue
-		}
+			channels, hasChannels := resultsMap["channels"].([]interface{})
+			if !hasChannels || len(channels) == 0 {
+				ds.logger.Warn("Response missing 'channels' field or empty")
+				continue
+			}
 
-		alt, isAltMap := alternatives[0].(map[string]interface{})
-		if isAltMap {
+			channel, isChannelMap := channels[0].(map[string]interface{})
+			if !isChannelMap {
+				ds.logger.Warn("First channel is not a map")
+				continue
+			}
+
+			alternatives, hasAlternatives := channel["alternatives"].([]interface{})
+			if !hasAlternatives || len(alternatives) == 0 {
+				ds.logger.Warn("Channel missing 'alternatives' field or empty")
+				continue
+			}
+
+			alt, isAltMap := alternatives[0].(map[string]interface{})
+			if !isAltMap {
+				ds.logger.Warn("Alternative is not a map")
+				continue
+			}
 			transcript := ""
 			confidence := 0.0
 			isFinal := true
@@ -300,8 +294,6 @@ func (ds *DeepgramStreamingService) readResponses(reader io.Reader, results chan
 			case <-time.After(5 * time.Second):
 				ds.logger.Error("❌ Timeout sending transcription result")
 			}
-		} else {
-			ds.logger.Warn("Alternative is not a map")
 		}
 	}
 }
