@@ -24,16 +24,17 @@ type WebSocketService struct {
 
 // Client represents a WebSocket client connection
 type Client struct {
-	ID           string
-	Conn         *websocket.Conn
-	Send         chan []byte
-	Language     string
-	SessionID    string
-	IsRecording  bool
-	LastActivity time.Time
-	AudioChunks  chan []byte
-	StreamingCtx context.Context
+	ID              string
+	Conn            *websocket.Conn
+	Send            chan []byte
+	Language        string
+	SessionID       string
+	IsRecording     bool
+	LastActivity    time.Time
+	AudioChunks     chan []byte
+	StreamingCtx    context.Context
 	StreamingCancel context.CancelFunc
+	closeOnce       sync.Once
 }
 
 // Message types for WebSocket communication
@@ -126,8 +127,10 @@ func (ws *WebSocketService) handleClient(client *Client) {
 		// Cancel streaming context
 		client.StreamingCancel()
 		
-		// Close audio chunks channel
-		close(client.AudioChunks)
+		// Close audio chunks channel (only once using sync.Once)
+		client.closeOnce.Do(func() {
+			close(client.AudioChunks)
+		})
 		
 		ws.mutex.Lock()
 		delete(ws.clients, client.ID)
@@ -220,13 +223,20 @@ func (ws *WebSocketService) processMessage(client *Client, msg *WSMessage) {
 
 	case "stop_recording":
 		client.IsRecording = false
+		
+		// Close the audio chunks channel to signal end of audio
+		// But DON'T cancel the context yet - let Deepgram finish processing
+		client.closeOnce.Do(func() {
+			close(client.AudioChunks)
+		})
+		
 		ws.sendMessage(client, WSMessage{
 			Type:      "recording_stopped",
 			Data:      map[string]string{"session_id": client.SessionID},
 			SessionID: client.SessionID,
 			Timestamp: time.Now().Unix(),
 		})
-		ws.logger.WithField("client_id", client.ID).Info("Recording stopped")
+		ws.logger.WithField("client_id", client.ID).Info("Recording stopped, waiting for final transcriptions")
 
 	case "pause_recording":
 		client.IsRecording = false
