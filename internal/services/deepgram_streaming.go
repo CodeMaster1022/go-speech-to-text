@@ -133,23 +133,34 @@ func (ds *DeepgramStreamingService) sendAudioChunks(ctx context.Context, writer 
 	}()
 
 	chunkCount := 0
+	totalBytes := 0
+	
 	for {
 		select {
 		case chunk, ok := <-audioChunks:
 			if !ok {
-				ds.logger.Infof("Audio chunks channel closed after sending %d chunks", chunkCount)
+				ds.logger.Infof("Audio chunks channel closed after sending %d chunks (%d bytes total)", chunkCount, totalBytes)
 				return
 			}
-			if _, err := writer.Write(chunk); err != nil {
+			
+			n, err := writer.Write(chunk)
+			if err != nil {
 				ds.logger.WithError(err).Error("Failed to send audio chunk to Deepgram")
 				return
 			}
+			
 			chunkCount++
+			totalBytes += n
+			
+			if chunkCount == 1 {
+				ds.logger.Info("First audio chunk sent to Deepgram successfully")
+			}
+			
 			if chunkCount%50 == 0 {
-				ds.logger.Infof("Sent %d audio chunks to Deepgram", chunkCount)
+				ds.logger.Infof("Sent %d audio chunks to Deepgram (%d bytes total)", chunkCount, totalBytes)
 			}
 		case <-ctx.Done():
-			ds.logger.Infof("Context cancelled, stopping audio sender after %d chunks", chunkCount)
+			ds.logger.Infof("Context cancelled, stopping audio sender after %d chunks (%d bytes)", chunkCount, totalBytes)
 			return
 		}
 	}

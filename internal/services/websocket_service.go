@@ -278,10 +278,15 @@ func (ws *WebSocketService) processAudioChunk(client *Client, msg *WSMessage) {
 		return
 	}
 
+	ws.logger.WithFields(map[string]interface{}{
+		"client_id":  client.ID,
+		"chunk_size": len(audioBytes),
+	}).Debug("Received audio chunk from client")
+
 	// Send audio chunk to Deepgram streaming
 	select {
 	case client.AudioChunks <- audioBytes:
-		// Audio chunk sent successfully
+		ws.logger.WithField("client_id", client.ID).Debug("Audio chunk sent to Deepgram pipeline")
 	default:
 		ws.logger.WithField("client_id", client.ID).Warn("Audio chunks channel full, dropping chunk")
 	}
@@ -289,6 +294,8 @@ func (ws *WebSocketService) processAudioChunk(client *Client, msg *WSMessage) {
 
 // startDeepgramStreaming starts Deepgram streaming for a client
 func (ws *WebSocketService) startDeepgramStreaming(client *Client) {
+	ws.logger.WithField("client_id", client.ID).Info("Initializing Deepgram streaming for client")
+
 	// Create streaming options
 	options := DefaultStreamingOptions()
 	options.Language = client.Language
@@ -310,6 +317,8 @@ func (ws *WebSocketService) startDeepgramStreaming(client *Client) {
 		return
 	}
 
+	ws.logger.WithField("client_id", client.ID).Info("Deepgram streaming started successfully")
+
 	// Process results
 	for {
 		select {
@@ -318,6 +327,12 @@ func (ws *WebSocketService) startDeepgramStreaming(client *Client) {
 				ws.logger.WithField("client_id", client.ID).Info("Deepgram streaming ended")
 				return
 			}
+
+			ws.logger.WithFields(map[string]interface{}{
+				"client_id": client.ID,
+				"text":      result.Text,
+				"is_final":  !result.IsPartial,
+			}).Info("Received transcription from Deepgram")
 
 			// Send transcription result to client
 			transcriptionData := TranscriptionData{
