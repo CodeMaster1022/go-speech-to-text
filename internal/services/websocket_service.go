@@ -274,6 +274,12 @@ func (ws *WebSocketService) processMessage(client *Client, msg *WSMessage) {
 
 // processAudioChunk processes audio data for real-time transcription
 func (ws *WebSocketService) processAudioChunk(client *Client, msg *WSMessage) {
+	// Check if client is still recording
+	if !client.IsRecording {
+		ws.logger.WithField("client_id", client.ID).Debug("Ignoring audio chunk - recording stopped")
+		return
+	}
+
 	// Get base64 audio data from message
 	audioData, ok := msg.Data.(string)
 	if !ok {
@@ -294,6 +300,13 @@ func (ws *WebSocketService) processAudioChunk(client *Client, msg *WSMessage) {
 	}).Debug("Received audio chunk from client")
 
 	// Send audio chunk to Deepgram streaming
+	// Use defer/recover to handle any panic from closed channel
+	defer func() {
+		if r := recover(); r != nil {
+			ws.logger.WithField("client_id", client.ID).Debug("Audio chunks channel already closed")
+		}
+	}()
+
 	select {
 	case client.AudioChunks <- audioBytes:
 		ws.logger.WithField("client_id", client.ID).Debug("Audio chunk sent to Deepgram pipeline")
