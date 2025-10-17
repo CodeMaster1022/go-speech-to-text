@@ -78,8 +78,11 @@ func (ds *DeepgramStreamingService) StartStreamingTranscription(
 	params := ds.buildStreamingParams(options)
 	url := fmt.Sprintf("https://api.deepgram.com/v1/listen?%s", params)
 
-	// Create HTTP request
-	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	// Create a pipe to send audio chunks - MUST be created BEFORE the request
+	reader, writer := io.Pipe()
+
+	// Create HTTP request with the pipe reader as the body
+	req, err := http.NewRequestWithContext(ctx, "POST", url, reader)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -89,7 +92,12 @@ func (ds *DeepgramStreamingService) StartStreamingTranscription(
 	req.Header.Set("Content-Type", "audio/webm")
 	req.Header.Set("Transfer-Encoding", "chunked")
 
-	// Start the request
+	ds.logger.Info("Starting Deepgram streaming connection...")
+
+	// Start goroutine to send audio chunks to the pipe
+	go ds.sendAudioChunks(ctx, writer, audioChunks)
+
+	// Start the request (this will block until complete or context is cancelled)
 	resp, err := ds.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to start streaming request: %w", err)
@@ -98,35 +106,48 @@ func (ds *DeepgramStreamingService) StartStreamingTranscription(
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
+		ds.logger.Errorf("Deepgram returned status %d: %s", resp.StatusCode, string(bodyBytes))
 		return fmt.Errorf("streaming request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// Create a pipe to send audio chunks
-	reader, writer := io.Pipe()
-	
-	// Start goroutine to send audio chunks
-	go ds.sendAudioChunks(writer, audioChunks)
-	
-	// Update the request body to use the pipe reader
-	req.Body = reader
+	ds.logger.Info("Deepgram streaming connection established successfully")
 
 	// Start goroutine to read responses
 	go ds.readResponses(resp.Body, results)
+
+	// Wait for context to be cancelled
+	<-ctx.Done()
 
 	return nil
 }
 
 // sendAudioChunks sends audio chunks to Deepgram
-func (ds *DeepgramStreamingService) sendAudioChunks(writer io.Writer, audioChunks <-chan []byte) {
+func (ds *DeepgramStreamingService) sendAudioChunks(ctx context.Context, writer io.Writer, audioChunks <-chan []byte) {
 	defer func() {
 		if closer, ok := writer.(io.Closer); ok {
 			closer.Close()
 		}
+		ds.logger.Info("Audio chunk sender stopped")
 	}()
 
-	for chunk := range audioChunks {
-		if _, err := writer.Write(chunk); err != nil {
-			ds.logger.WithError(err).Error("Failed to send audio chunk")
+	chunkCount := 0
+	for {
+		select {
+		case chunk, ok := <-audioChunks:
+			if !ok {
+				ds.logger.Infof("Audio chunks channel closed after sending %d chunks", chunkCount)
+				return
+			}
+			if _, err := writer.Write(chunk); err != nil {
+				ds.logger.WithError(err).Error("Failed to send audio chunk to Deepgram")
+				return
+			}
+			chunkCount++
+			if chunkCount%50 == 0 {
+				ds.logger.Infof("Sent %d audio chunks to Deepgram", chunkCount)
+			}
+		case <-ctx.Done():
+			ds.logger.Infof("Context cancelled, stopping audio sender after %d chunks", chunkCount)
 			return
 		}
 	}
