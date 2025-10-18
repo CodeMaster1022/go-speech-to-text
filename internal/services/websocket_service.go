@@ -147,8 +147,8 @@ func (ws *WebSocketService) handleClient(client *Client) {
 	})
 
 	for {
-		var msg WSMessage
-		err := client.Conn.ReadJSON(&msg)
+		// 🚀 Handle both text and binary messages
+		messageType, messageData, err := client.Conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				ws.logger.WithError(err).WithField("client_id", client.ID).Error("WebSocket error")
@@ -157,7 +157,24 @@ func (ws *WebSocketService) handleClient(client *Client) {
 		}
 
 		client.LastActivity = time.Now()
-		ws.processMessage(client, &msg)
+
+		switch messageType {
+		case websocket.TextMessage:
+			// Handle JSON messages
+			var msg WSMessage
+			if err := json.Unmarshal(messageData, &msg); err != nil {
+				ws.logger.WithError(err).WithField("client_id", client.ID).Error("Failed to parse JSON message")
+				continue
+			}
+			ws.processMessage(client, &msg)
+
+		case websocket.BinaryMessage:
+			// Handle binary audio data directly
+			ws.processBinaryAudioChunk(client, messageData)
+
+		default:
+			ws.logger.WithField("client_id", client.ID).Warn("Unknown message type received")
+		}
 	}
 }
 
@@ -259,8 +276,12 @@ func (ws *WebSocketService) processMessage(client *Client, msg *WSMessage) {
 		}
 
 	case "audio_chunk":
-		// Process audio chunk for real-time transcription
+		// Process audio chunk for real-time transcription (legacy base64)
 		ws.processAudioChunk(client, msg)
+
+	case "audio_chunk_binary":
+		// Binary audio chunk metadata received - actual binary data follows
+		ws.logger.WithField("client_id", client.ID).Debug("Binary audio chunk metadata received")
 
 	case "ping":
 		ws.sendMessage(client, WSMessage{
@@ -312,6 +333,34 @@ func (ws *WebSocketService) processAudioChunk(client *Client, msg *WSMessage) {
 		ws.logger.WithField("client_id", client.ID).Debug("Audio chunk sent to Deepgram pipeline")
 	default:
 		ws.logger.WithField("client_id", client.ID).Warn("Audio chunks channel full, dropping chunk")
+	}
+}
+
+// 🚀 processBinaryAudioChunk processes binary audio data directly (no base64 decoding needed)
+func (ws *WebSocketService) processBinaryAudioChunk(client *Client, audioBytes []byte) {
+	// Check if client is still recording
+	if !client.IsRecording {
+		ws.logger.WithField("client_id", client.ID).Debug("Ignoring binary audio chunk - recording stopped")
+		return
+	}
+
+	ws.logger.WithFields(map[string]interface{}{
+		"client_id":  client.ID,
+		"chunk_size": len(audioBytes),
+	}).Debug("Received binary audio chunk from client")
+
+	// Send audio chunk to Deepgram streaming (no decoding needed!)
+	defer func() {
+		if r := recover(); r != nil {
+			ws.logger.WithField("client_id", client.ID).Debug("Audio chunks channel already closed")
+		}
+	}()
+
+	select {
+	case client.AudioChunks <- audioBytes:
+		ws.logger.WithField("client_id", client.ID).Debug("Binary audio chunk sent to Deepgram pipeline")
+	default:
+		ws.logger.WithField("client_id", client.ID).Warn("Audio chunks channel full, dropping binary chunk")
 	}
 }
 

@@ -340,6 +340,11 @@ func (ds *DeepgramStreamingService) buildStreamingParams(options *StreamingTrans
 		params = append(params, "vad_events=true")
 	}
 
+	// 🚀 Additional real-time optimization parameters
+	params = append(params, "utterance_end_ms=1000")  // Shorter utterance timeout for faster results
+	params = append(params, "vad_turnoff=250")        // Faster voice activity detection turnoff
+	params = append(params, "no_delay=true")          // Minimize processing delays
+
 	// Join parameters
 	var result string
 	for i, param := range params {
@@ -352,22 +357,22 @@ func (ds *DeepgramStreamingService) buildStreamingParams(options *StreamingTrans
 	return result
 }
 
-// DefaultStreamingOptions returns default streaming options
+// DefaultStreamingOptions returns default streaming options optimized for speed
 func DefaultStreamingOptions() *StreamingTranscriptionOptions {
 	return &StreamingTranscriptionOptions{
 		Model:           "nova-2",
 		Language:        "en",
-		Punctuate:       true,
+		Punctuate:       false,             // 🚀 Disabled for speed
 		Diarize:         false,
-		SmartFormat:     true,
-		IncludeWords:    true,
-		MedicalVocab:    true,
+		SmartFormat:     false,             // 🚀 Disabled for speed
+		IncludeWords:    false,             // 🚀 Disabled for speed - reduces processing time
+		MedicalVocab:    true,              // Keep for medical terms detection
 		Redact:          false,
 		Multichannel:    false,
-		Alternatives:    1,
+		Alternatives:    1,                 // Minimum for fastest processing
 		ProfanityFilter: false,
-		InterimResults:  true,  // Send partial results as user speaks
-		Endpointing:     false, // Don't wait for pauses - send immediately
-		VadEvents:       true,  // Voice activity detection for better real-time
+		InterimResults:  true,              // ✅ Essential for live captions
+		Endpointing:     false,             // ✅ Don't wait for pauses - send immediately
+		VadEvents:       true,              // ✅ Voice activity detection for better real-time
 	}
 }
