@@ -294,8 +294,8 @@ func (ds *DeepgramStreamingService) buildStreamingParams(options *StreamingTrans
 	// Set encoding to linear16 (raw PCM)
 	params = append(params, "encoding=linear16")
 	
-	// Set sample rate for linear16 (48000 is common for browsers)
-	params = append(params, "sample_rate=48000")
+	// Set sample rate for linear16 (16000 is standard for speech recognition)
+	params = append(params, "sample_rate=16000")
 	
 	// Set channels (mono)
 	params = append(params, "channels=1")
