@@ -360,9 +360,9 @@ func (ds *DeepgramStreamingService) buildStreamingParams(options *StreamingTrans
 // DefaultStreamingOptions returns default streaming options optimized for speed
 func DefaultStreamingOptions() *StreamingTranscriptionOptions {
 	return &StreamingTranscriptionOptions{
-		Model:           "nova-2",
+		Model:           "nova-3-medical",
 		Language:        "en",
-		Punctuate:       false,             // 🚀 Disabled for speed
+		Punctuate:       true,             // 🚀 Disabled for speed
 		Diarize:         false,
 		SmartFormat:     false,             // 🚀 Disabled for speed
 		IncludeWords:    false,             // 🚀 Disabled for speed - reduces processing time
@@ -370,9 +370,10 @@ func DefaultStreamingOptions() *StreamingTranscriptionOptions {
 		Redact:          false,
 		Multichannel:    false,
 		Alternatives:    1,                 // Minimum for fastest processing
-		ProfanityFilter: false,
+		ProfanityFilter: true,
 		InterimResults:  true,              // ✅ Essential for live captions
 		Endpointing:     false,             // ✅ Don't wait for pauses - send immediately
-		VadEvents:       true,              // ✅ Voice activity detection for better real-time
+		VadEvents:       true,  
+		numerals:        true      // ✅ Voice activity detection for better real-time
 	}
 }
